@@ -1,18 +1,6 @@
-	# 1. 忽略依赖目录（解决您之前的报错关键）
-	node_modules/
-	# 2. 忽略编译产物
-	target/
-	dist/
-	build/
-	*.class
-	*.jar
-	*.war
-	# 3. 忽略日志文件
-	*.log
-	# 4. 忽略 IDE 配置文件
-	.idea/
-	*.iml
-	.vscode/
-	# 5. 忽略操作系统文件
-	.DS_Store
-	Thumbs.db
+**/target/
+.idea/
+*.iml
+*.class
+*Test.java
+**/test/
