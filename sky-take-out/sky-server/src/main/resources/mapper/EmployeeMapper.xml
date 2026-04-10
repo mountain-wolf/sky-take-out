@@ -9,7 +9,7 @@
                 and name like concat('%',#{name},'%')
             </if>
         </where>
-        order by create_time desc
+        order by create_time ASC
     </select>
 
     <update id="update" parameterType="Employee">

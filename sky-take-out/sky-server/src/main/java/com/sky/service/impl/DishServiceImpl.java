@@ -8,8 +8,10 @@ import com.sky.dto.DishDTO;
 import com.sky.dto.DishPageQueryDTO;
 import com.sky.entity.Dish;
 import com.sky.entity.DishFlavor;
+import com.sky.entity.OrderDetail;
 import com.sky.entity.Setmeal;
 import com.sky.exception.DeletionNotAllowedException;
+import com.sky.exception.ShoppingCartBusinessException;
 import com.sky.mapper.DishFlavorMapper;
 import com.sky.mapper.DishMapper;
 import com.sky.mapper.SetmealDishMapper;
@@ -225,5 +227,38 @@ public class DishServiceImpl implements DishService {
         }
 
         return dishVOList;
+    }
+
+    /**
+     * 扣减菜品库存
+     * @param orderDetail 订单明细
+     */
+    public void decreaseWarehouse(OrderDetail orderDetail) {
+        Long dishId = orderDetail.getDishId();
+        Integer number = orderDetail.getNumber();
+        // 查询当前库存
+        Dish dish = dishMapper.getById(dishId);
+        // 扣减库存
+        dish.setWarehouse(dish.getWarehouse() - number);
+        dishMapper.updateWarehouse(dish);
+
+        log.info("菜品 {} 库存扣减成功，扣减数量：{}，剩余库存：{}", orderDetail.getName(), number, dish.getWarehouse());
+    }
+
+    /**
+     * 新增：恢复菜品库存（用于取消订单）
+     * @param orderDetail 订单明细
+     */
+    public void restoreWarehouse(OrderDetail orderDetail) {
+        Long dishId = orderDetail.getDishId();
+        Integer number = orderDetail.getNumber();
+        Dish dish = dishMapper.getById(dishId);
+        if (dish == null) {
+            throw new ShoppingCartBusinessException("菜品不存在");
+        }
+        dish.setWarehouse(dish.getWarehouse() + number);
+        dishMapper.updateWarehouse(dish);
+
+        log.info("菜品 {} 库存恢复成功，恢复数量：{}，当前库存：{}", orderDetail.getName(), number, dish.getWarehouse());
     }
 }

@@ -14,7 +14,9 @@ import com.sky.exception.OrderBusinessException;
 import com.sky.exception.ShoppingCartBusinessException;
 import com.sky.mapper.*;
 import com.sky.result.PageResult;
+import com.sky.service.DishService;
 import com.sky.service.OrderService;
+import com.sky.service.ShoppingCartService;
 import com.sky.utils.HttpClientUtil;
 import com.sky.utils.WeChatPayUtil;
 import com.sky.vo.OrderPaymentVO;
@@ -29,6 +31,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
+import org.redisson.api.RLock;        // 【修复1】引入 RLock 类
+import org.redisson.api.RedissonClient; // 【修复2】引入 RedissonClient 类
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -36,6 +40,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Service
@@ -48,14 +53,23 @@ public class OrderServiceImpl implements OrderService {
     private OrderDetailMapper orderDetailMapper;
     @Autowired
     private AddressBookMapper addressBookMapper;
-    @Autowired
-    private ShoppingCartMapper shoppingCartMapper;
+    /*@Autowired
+    private ShoppingCartMapper shoppingCartMapper;*/
     @Autowired
     private UserMapper userMapper;
     @Autowired
     private WeChatPayUtil weChatPayUtil;
     @Autowired
     private WebSocketServer webSocketServer;
+    // 注入 RedissonClient
+    @Autowired
+    private RedissonClient redissonClient;
+    @Autowired
+    private DishService dishService;
+    @Autowired
+    private DishMapper dishMapper;
+    @Autowired
+    private ShoppingCartService shoppingCartService;
 
     /**
      * 用户下单
@@ -64,66 +78,116 @@ public class OrderServiceImpl implements OrderService {
      */
     @Transactional
     public OrderSubmitVO submitOrder(OrdersSubmitDTO ordersSubmitDTO) {
+        // 获取当前用户ID
+        Long user_Id = BaseContext.getCurrentId();
+        // 定义锁的Key，格式：业务前缀:用户ID
+        String lockKey = "lock:order:submit:" + user_Id;
+        // 获取锁对象
+        RLock lock = redissonClient.getLock(lockKey);
+        OrderSubmitVO orderSubmitVO = null;
+        try {
+            // 尝试获取锁
+            // 参数1：等待时间；参数2：锁自动释放时间。
+            boolean isLocked = lock.tryLock(10, 15, TimeUnit.SECONDS);
+            if (!isLocked) {
+                // 获取锁失败，抛出异常
+                throw new OrderBusinessException("操作频繁，请稍后再试");
+            }
+            try {
+                //1. 处理各种业务异常（地址簿为空、购物车数据为空）
+                AddressBook addressBook = addressBookMapper.getById(ordersSubmitDTO.getAddressBookId());
+                if(addressBook == null){
+                    //抛出业务异常
+                    throw new AddressBookBusinessException(MessageConstant.ADDRESS_BOOK_IS_NULL);
+                }
 
-        //1. 处理各种业务异常（地址簿为空、购物车数据为空）
-        AddressBook addressBook = addressBookMapper.getById(ordersSubmitDTO.getAddressBookId());
-        if(addressBook == null){
-            //抛出业务异常
-            throw new AddressBookBusinessException(MessageConstant.ADDRESS_BOOK_IS_NULL);
-        }
+                //检查用户的收货地址是否超出配送范围
+                //checkOutOfRange(addressBook.getCityName() + addressBook.getDistrictName() + addressBook.getDetail());
 
-        //检查用户的收货地址是否超出配送范围
-        //checkOutOfRange(addressBook.getCityName() + addressBook.getDistrictName() + addressBook.getDetail());
+                //查询当前用户的购物车数据
+                Long userId = BaseContext.getCurrentId();
 
-        //查询当前用户的购物车数据
-        Long userId = BaseContext.getCurrentId();
+                /*ShoppingCart shoppingCart = new ShoppingCart();
+                shoppingCart.setUserId(userId);
+                List<ShoppingCart> shoppingCartList = shoppingCartMapper.list(shoppingCart);*/
+                List<ShoppingCart> shoppingCartList = shoppingCartService.showShoppingCart();
 
-        ShoppingCart shoppingCart = new ShoppingCart();
-        shoppingCart.setUserId(userId);
-        List<ShoppingCart> shoppingCartList = shoppingCartMapper.list(shoppingCart);
+                if(shoppingCartList == null || shoppingCartList.size() == 0){
+                    //抛出业务异常
+                    throw new ShoppingCartBusinessException(MessageConstant.SHOPPING_CART_IS_NULL);
+                }
 
-        if(shoppingCartList == null || shoppingCartList.size() == 0){
-            //抛出业务异常
-            throw new ShoppingCartBusinessException(MessageConstant.SHOPPING_CART_IS_NULL);
-        }
+                // 遍历购物车数据，减扣库存
+                for (ShoppingCart cart : shoppingCartList) {
+                    if(cart.getDishId() != null){
+                        Dish dish = dishMapper.getById(cart.getDishId());
+                        if(dish == null){
+                            //抛出业务异常
+                            throw new OrderBusinessException("商品【" + cart.getDishFlavor() + "】不存在");
+                        }
+                        if(dish.getStatus() != 1){
+                            //抛出业务异常
+                            throw new OrderBusinessException("商品【" + dish.getName() + "】已停售");
+                        }
+                        if(dish.getWarehouse() < cart.getNumber()){
+                            //抛出业务异常
+                            throw new OrderBusinessException("商品【" + dish.getName() + "】库存不足");
+                        }
 
-        //2. 向订单表插入1条数据
-        Orders orders = new Orders();
-        BeanUtils.copyProperties(ordersSubmitDTO, orders);
-        orders.setOrderTime(LocalDateTime.now());
-        orders.setPayStatus(Orders.UN_PAID);
-        orders.setStatus(Orders.PENDING_PAYMENT);
-        orders.setNumber(String.valueOf(System.currentTimeMillis()));
-        orders.setAddress(addressBook.getDetail());
-        orders.setPhone(addressBook.getPhone());
-        orders.setConsignee(addressBook.getConsignee());
-        orders.setUserId(userId);
+                    }
+                }
+                //2. 向订单表插入1条数据
+                Orders orders = new Orders();
+                BeanUtils.copyProperties(ordersSubmitDTO, orders);
+                orders.setOrderTime(LocalDateTime.now());
+                orders.setPayStatus(Orders.UN_PAID);
+                orders.setStatus(Orders.PENDING_PAYMENT);
+                orders.setNumber(String.valueOf(System.currentTimeMillis()));
+                orders.setAddress(addressBook.getDetail());
+                orders.setPhone(addressBook.getPhone());
+                orders.setConsignee(addressBook.getConsignee());
+                orders.setUserId(userId);
+                orders.setTablewareStatus(0);
+                try{
+                    orderMapper.insert(orders);
+                } catch(Exception e){
+                    e.printStackTrace();
+                }
 
-        orderMapper.insert(orders);
+                List<OrderDetail> orderDetailList = new ArrayList<>();
+                //3. 向订单明细表插入n条数据
+                for (ShoppingCart cart : shoppingCartList) {
+                    OrderDetail orderDetail = new OrderDetail();//订单明细
+                    BeanUtils.copyProperties(cart, orderDetail);
+                    orderDetail.setOrderId(orders.getId());//设置当前订单明细关联的订单id
+                    orderDetailList.add(orderDetail);
+                    dishService.decreaseWarehouse(orderDetail);
+                }
 
-        List<OrderDetail> orderDetailList = new ArrayList<>();
-        //3. 向订单明细表插入n条数据
-        for (ShoppingCart cart : shoppingCartList) {
-            OrderDetail orderDetail = new OrderDetail();//订单明细
-            BeanUtils.copyProperties(cart, orderDetail);
-            orderDetail.setOrderId(orders.getId());//设置当前订单明细关联的订单id
-            orderDetailList.add(orderDetail);
-        }
+                orderDetailMapper.insertBatch(orderDetailList);
 
-        orderDetailMapper.insertBatch(orderDetailList);
+                //4. 清空当前用户的购物车数据
+                shoppingCartService.cleanShoppingCart();
 
-        //4. 清空当前用户的购物车数据
-        shoppingCartMapper.deleteByUserId(userId);
+                //5. 封装VO返回结果
+                orderSubmitVO = OrderSubmitVO.builder()
+                        .id(orders.getId())
+                        .orderTime(orders.getOrderTime())
+                        .orderNumber(orders.getNumber())
+                        .orderAmount(orders.getAmount())
+                        .build();
 
-        //5. 封装VO返回结果
-        OrderSubmitVO orderSubmitVO = OrderSubmitVO.builder()
-                .id(orders.getId())
-                .orderTime(orders.getOrderTime())
-                .orderNumber(orders.getNumber())
-                .orderAmount(orders.getAmount())
-                .build();
+                return orderSubmitVO;
+                }finally {
+                    // 判断当前线程是否持有锁
+                    if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                    }
+                 }
+            }catch (InterruptedException e) {
+                throw new OrderBusinessException("服务器繁忙，请重试");
+             }
 
-        return orderSubmitVO;
     }
 
     @Value("${sky.shop.address}")
@@ -177,7 +241,7 @@ public class OrderServiceImpl implements OrderService {
         map.put("destination",userLngLat);
         map.put("steps_info","0");
 
-        //路线规划
+        //地址解析
         String json = HttpClientUtil.doGet("https://api.map.baidu.com/directionlite/v1/driving", map);
 
         jsonObject = JSON.parseObject(json);
@@ -215,11 +279,14 @@ public class OrderServiceImpl implements OrderService {
                 user.getOpenid() //微信用户的openid
         );
 
+        // 判断订单是否已支付，如果返回码为 ORDERPAID 则抛出业务异常
         if (jsonObject.getString("code") != null && jsonObject.getString("code").equals("ORDERPAID")) {
             throw new OrderBusinessException("该订单已支付");
         }
 
+        // 将 JSONObject 转换为 OrderPaymentVO 对象
         OrderPaymentVO vo = jsonObject.toJavaObject(OrderPaymentVO.class);
+        // 设置支付所需的 package 字符串参数
         vo.setPackageStr(jsonObject.getString("package"));
 
         return vo;
@@ -253,7 +320,9 @@ public class OrderServiceImpl implements OrderService {
         map.put("orderId",ordersDB.getId());
         map.put("content","订单号：" + outTradeNo);
 
+        // 将消息 Map 转换为 JSON 字符串
         String json = JSON.toJSONString(map);
+        // 通过 WebSocket 向所有客户端发送消息
         webSocketServer.sendToAllClient(json);
     }
 
@@ -357,6 +426,13 @@ public class OrderServiceImpl implements OrderService {
         orders.setCancelReason("用户取消");
         orders.setCancelTime(LocalDateTime.now());
         orderMapper.update(orders);
+        // 查询该订单对应的菜品/套餐明细
+        List<OrderDetail> orderDetailList = orderDetailMapper.getByOrderId(ordersDB.getId());
+        // 调用菜品服务进行商品库存恢复
+        for (OrderDetail orderDetail : orderDetailList) {
+            dishService.restoreWarehouse(orderDetail);
+        }
+
     }
 
     /**
@@ -384,7 +460,8 @@ public class OrderServiceImpl implements OrderService {
         }).collect(Collectors.toList());
 
         // 将购物车对象批量添加到数据库
-        shoppingCartMapper.insertBatch(shoppingCartList);
+        shoppingCartService.addShoppingCart(shoppingCartList);
+
     }
 
     /**
@@ -511,6 +588,12 @@ public class OrderServiceImpl implements OrderService {
         orders.setCancelTime(LocalDateTime.now());
 
         orderMapper.update(orders);
+        // 查询该订单对应的菜品/套餐明细
+        List<OrderDetail> orderDetailList = orderDetailMapper.getByOrderId(ordersDB.getId());
+        // 调用菜品服务进行商品库存恢复
+        for (OrderDetail orderDetail : orderDetailList) {
+            dishService.restoreWarehouse(orderDetail);
+        }
     }
 
     /**
@@ -541,6 +624,12 @@ public class OrderServiceImpl implements OrderService {
         orders.setCancelReason(ordersCancelDTO.getCancelReason());
         orders.setCancelTime(LocalDateTime.now());
         orderMapper.update(orders);
+        // 查询该订单对应的菜品/套餐明细
+        List<OrderDetail> orderDetailList = orderDetailMapper.getByOrderId(ordersDB.getId());
+        // 调用菜品服务进行商品库存恢复
+        for (OrderDetail orderDetail : orderDetailList) {
+            dishService.restoreWarehouse(orderDetail);
+        }
     }
 
     /**

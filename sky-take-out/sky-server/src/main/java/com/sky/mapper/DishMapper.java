@@ -88,4 +88,11 @@ public interface DishMapper {
      * @return
      */
     Integer countByMap(Map map);
+
+    /**
+     * 新增：更新菜品库存
+     * @param dish
+     */
+    @AutoFill(value = OperationType.UPDATE)
+    void updateWarehouse(Dish dish);
 }

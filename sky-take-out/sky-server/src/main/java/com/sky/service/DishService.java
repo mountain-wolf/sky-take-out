@@ -3,6 +3,7 @@ package com.sky.service;
 import com.sky.dto.DishDTO;
 import com.sky.dto.DishPageQueryDTO;
 import com.sky.entity.Dish;
+import com.sky.entity.OrderDetail;
 import com.sky.result.PageResult;
 import com.sky.vo.DishVO;
 
@@ -69,4 +70,15 @@ public interface DishService {
      * @return
      */
     List<DishVO> listWithFlavor(Dish dish);
+    /**
+     * 扣减菜品库存
+     * @param orderDetail orderDetail 订单详情
+     */
+    void decreaseWarehouse(OrderDetail orderDetail);
+
+    /**
+     * 恢复菜品库存
+     * @param orderDetail 订单详情
+     */
+    void restoreWarehouse(OrderDetail orderDetail);
 }

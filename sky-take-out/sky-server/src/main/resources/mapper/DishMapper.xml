@@ -68,4 +68,15 @@
             </if>
         </where>
     </select>
+
+    <!-- 新增：更新菜品库存 -->
+    <update id="updateWarehouse" parameterType="com.sky.entity.Dish">
+        update dish
+        <set>
+            <if test="warehouse != null">
+                warehouse = #{warehouse},
+            </if>
+        </set>
+        where id = #{id}
+    </update>
 </mapper>
